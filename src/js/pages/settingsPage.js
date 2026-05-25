@@ -322,18 +322,57 @@ export class SettingsPage {
                 }
             });
 
-            keyImportBtn?.addEventListener('click', async () => {
-                const input = prompt('貼上您的 64 位元金鑰（切換後將重新載入頁面）：');
-                if (!input) return;
-                try {
-                    setKey(input.trim());
-                    showToast('金鑰已更新，正在重新載入...', 'success');
-                    setTimeout(() => window.location.reload(), 1000);
-                } catch (e) {
-                    showToast(`金鑰格式錯誤：${e.message}`, 'error');
-                }
-            });
+            keyImportBtn?.addEventListener('click', () => this._showKeyImportModal());
         }
+    }
+
+    // L3 fix: replace prompt() with an inline modal so the key never touches a browser dialog
+    _showKeyImportModal() {
+        const overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4';
+        overlay.innerHTML = `
+            <div class="bg-wabi-surface rounded-2xl p-6 w-full max-w-sm space-y-4 shadow-xl">
+                <h3 class="text-wabi-primary font-bold text-lg">匯入資料金鑰</h3>
+                <p class="text-xs text-wabi-text-secondary">貼上您的 64 位元十六進位金鑰。切換後頁面將重新載入。</p>
+                <input id="key-import-input" type="text" maxlength="64" autocomplete="off" spellcheck="false"
+                    placeholder="0000...0000（64 個十六進位字元）"
+                    class="w-full font-mono text-xs bg-wabi-bg border border-wabi-border rounded-lg px-3 py-2 text-wabi-text-primary focus:outline-none focus:ring-2 focus:ring-wabi-primary">
+                <p id="key-import-error" class="text-xs text-red-500 hidden"></p>
+                <div class="flex gap-3 justify-end">
+                    <button id="key-import-cancel"
+                        class="px-4 py-2 text-sm rounded-lg bg-wabi-bg text-wabi-text-secondary hover:bg-wabi-border">
+                        取消
+                    </button>
+                    <button id="key-import-confirm"
+                        class="px-4 py-2 text-sm rounded-lg bg-wabi-primary text-white hover:opacity-90">
+                        切換
+                    </button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('#key-import-input');
+        const errorEl = overlay.querySelector('#key-import-error');
+
+        const close = () => document.body.removeChild(overlay);
+
+        overlay.querySelector('#key-import-cancel').addEventListener('click', close);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+        overlay.querySelector('#key-import-confirm').addEventListener('click', () => {
+            const val = input.value.trim();
+            try {
+                setKey(val);
+                close();
+                showToast('金鑰已更新，正在重新載入...', 'success');
+                setTimeout(() => window.location.reload(), 800);
+            } catch {
+                errorEl.textContent = '格式錯誤：須為 64 個小寫十六進位字元';
+                errorEl.classList.remove('hidden');
+            }
+        });
+
+        input.focus();
     }
 
     createSettingItem(icon, text, id) {

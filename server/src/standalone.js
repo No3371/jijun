@@ -17,12 +17,15 @@
  *   DATA_DIR             SQLite files directory (default ../data)
  *   GOOGLE_CLIENT_ID     Google OAuth client id
  *   GOOGLE_CLIENT_SECRET Google OAuth client secret
- *   ALLOWED_ORIGINS      comma-separated CORS origins (default *)
+ *   ALLOWED_ORIGINS      comma-separated CORS origins (empty = same-origin only)
+ *   MAX_BODY_BYTES       max request body size in bytes (default 52428800 = 50 MB)
+ *   MAX_DBS              max concurrent open SQLite handles (default 500)
+ *   NEW_DB_RATE_LIMIT    max new database creations per IP per hour (default 20)
  */
 
 import { createServer } from 'node:http';
 import { createReadStream, statSync, existsSync } from 'node:fs';
-import { join, extname, dirname } from 'node:path';
+import { join, extname, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDb } from './db.js';
 import {
@@ -35,6 +38,8 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const DIST_DIR = join(__dirname, '../../dist');
+const MAX_BODY_BYTES = parseInt(process.env.MAX_BODY_BYTES || String(50 * 1024 * 1024), 10);
+const NEW_DB_RATE_LIMIT = parseInt(process.env.NEW_DB_RATE_LIMIT || '20', 10);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -55,28 +60,69 @@ const MIME = {
 
 const KEY_RE = /^[0-9a-f]{64}$/;
 
+// ── IP rate limiter for new DB creation ───────────────────────────────────
+// Tracks how many new (previously unseen) keys each IP opened in the current hour.
+const newDbCountByIp = new Map(); // ip → { count, resetAt }
+
+function checkNewDbRateLimit(ip) {
+  const now = Date.now();
+  const entry = newDbCountByIp.get(ip) ?? { count: 0, resetAt: now + 3_600_000 };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 3_600_000; }
+  if (entry.count >= NEW_DB_RATE_LIMIT) return false;
+  entry.count++;
+  newDbCountByIp.set(ip, entry);
+  return true;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
 function mimeType(filePath) {
   return MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
 }
 
+// H3 fix: default to empty string (no cross-origin access) instead of '*'
 function corsHeaders(req) {
-  const allowed = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
+  const rawAllowed = process.env.ALLOWED_ORIGINS || '';
+  if (!rawAllowed) return {};
+  const allowed = rawAllowed.split(',').map(s => s.trim()).filter(Boolean);
   const origin = req.headers['origin'] || '';
   const hdrs = {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Data-Key',
     'Access-Control-Max-Age': '86400',
   };
-  if (allowed.includes('*') || allowed.includes(origin)) {
-    hdrs['Access-Control-Allow-Origin'] = allowed.includes('*') ? '*' : origin;
+  if (allowed.includes('*')) {
+    hdrs['Access-Control-Allow-Origin'] = '*';
+  } else if (allowed.includes(origin)) {
+    hdrs['Access-Control-Allow-Origin'] = origin;
+    hdrs['Vary'] = 'Origin';
   }
   return hdrs;
 }
 
+// H1 fix: read body with a hard size cap
+async function readBodyRaw(req, maxBytes = MAX_BODY_BYTES) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const err = new Error('Payload too large');
+      err.statusCode = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+// M3 fix: explicit path containment guard for static files
 function serveStatic(req, res, urlPath) {
   const candidates = urlPath === '/' ? ['index.html'] : [urlPath.replace(/^\//, ''), 'index.html'];
   for (const candidate of candidates) {
     const filePath = join(DIST_DIR, candidate);
+    // Ensure resolved path stays inside DIST_DIR
+    if (!filePath.startsWith(DIST_DIR + sep) && filePath !== DIST_DIR) continue;
     if (existsSync(filePath)) {
       try {
         const stat = statSync(filePath);
@@ -99,27 +145,64 @@ function serveStatic(req, res, urlPath) {
   }
 }
 
-async function handleOAuth(req, res, pathname) {
-  const ch = corsHeaders(req);
-  const env = { GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '', GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '' };
-  const chunks = []; for await (const c of req) chunks.push(c);
-  const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-  let tokenBody;
+// C1 fix: full try/catch + body size limit for OAuth handler
+async function handleOAuth(req, res, pathname, ch) {
+  try {
+    const raw = await readBodyRaw(req, 64 * 1024); // 64 KB max for OAuth payloads
+    let body;
+    try {
+      body = JSON.parse(raw || '{}');
+    } catch {
+      res.writeHead(400, { ...ch, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      return;
+    }
 
-  if (pathname === '/api/auth/token') {
-    tokenBody = new URLSearchParams({ code: body.code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: body.redirect_uri || 'postmessage', grant_type: 'authorization_code' });
-  } else {
-    tokenBody = new URLSearchParams({ refresh_token: body.refresh_token, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, grant_type: 'refresh_token' });
+    const env = {
+      GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
+      GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',
+    };
+
+    let tokenBody;
+    if (pathname === '/api/auth/token') {
+      tokenBody = new URLSearchParams({
+        code: body.code ?? '',
+        client_id: env.GOOGLE_CLIENT_ID,
+        client_secret: env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: body.redirect_uri || 'postmessage',
+        grant_type: 'authorization_code',
+      });
+    } else {
+      tokenBody = new URLSearchParams({
+        refresh_token: body.refresh_token ?? '',
+        client_id: env.GOOGLE_CLIENT_ID,
+        client_secret: env.GOOGLE_CLIENT_SECRET,
+        grant_type: 'refresh_token',
+      });
+    }
+
+    const gRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenBody,
+    });
+    const data = await gRes.json();
+    res.writeHead(gRes.status, { ...ch, 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  } catch (e) {
+    if (e.statusCode === 413) {
+      res.writeHead(413, { ...ch, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Payload too large' }));
+    } else {
+      console.error('OAuth handler error:', e.message);
+      res.writeHead(500, { ...ch, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
   }
-
-  const gRes = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: tokenBody });
-  const data = await gRes.json();
-  res.writeHead(gRes.status, { ...ch, 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
 }
 
 async function routeData(req, res, db, method, segments) {
-  // segments: ['data', resource, id?, ...]
+  // segments: ['data', resource, id?, sub?]
   const [, resource, id, sub] = segments;
 
   switch (resource) {
@@ -140,7 +223,8 @@ async function routeData(req, res, db, method, segments) {
     case 'export': return handleExport(req, res, db);
     case 'backup': return method === 'GET' ? handleBackup(req, res, db) : handleRestore(req, res, db);
     default:
-      res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' }));
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
   }
 }
 
@@ -154,7 +238,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(204, ch); res.end(); return;
   }
 
-  // Add CORS to all API responses
+  // Add CORS headers to all API responses
   for (const [k, v] of Object.entries(ch)) res.setHeader(k, v);
 
   // Health
@@ -166,10 +250,10 @@ const server = createServer(async (req, res) => {
 
   // OAuth proxy
   if (method === 'POST' && (pathname === '/api/auth/token' || pathname === '/api/auth/refresh')) {
-    await handleOAuth(req, res, pathname); return;
+    await handleOAuth(req, res, pathname, ch); return;
   }
 
-  // Data API — requires X-Data-Key
+  // Data API — requires valid X-Data-Key
   if (pathname.startsWith('/api/data/')) {
     const key = req.headers['x-data-key'];
     if (!key || !KEY_RE.test(key)) {
@@ -177,14 +261,31 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Missing or invalid X-Data-Key' }));
       return;
     }
-    const db = getDb(key);
+
+    // C2 fix: rate-limit new DB file creation per IP
+    const { isNew, db } = getDb(key);
+    if (isNew) {
+      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() ?? req.socket.remoteAddress ?? 'unknown';
+      if (!checkNewDbRateLimit(ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many new databases created from this IP. Try again later.' }));
+        return;
+      }
+    }
+
     const segments = pathname.replace('/api/', '').split('/');
     try {
       await routeData(req, res, db, method, segments);
     } catch (e) {
-      console.error('Data API error:', e);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Internal server error', message: e.message }));
+      if (e.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payload too large' }));
+      } else {
+        // H2 fix: log internally, never expose e.message to clients
+        console.error('Data API error:', e);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error' }));
+      }
     }
     return;
   }

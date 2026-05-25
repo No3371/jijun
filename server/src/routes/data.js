@@ -303,7 +303,7 @@ export async function handlePlugins(req, res, db, method, id) {
 
 export async function handleFiles(req, res, db, method, id) {
   if (method === 'POST') {
-    const body = await readBody(req);
+    const body = await readBody(req, FILE_MAX);
     const newId = files.add(db, body);
     return json(res, { id: newId }, 201);
   }
@@ -583,9 +583,22 @@ export async function handleRestore(req, res, db) {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async function readBody(req) {
+// H1 fix: enforce a per-request body size cap; throws {statusCode:413} on excess.
+const DEFAULT_MAX = parseInt(process.env.MAX_BODY_BYTES || String(50 * 1024 * 1024), 10);
+const FILE_MAX    = parseInt(process.env.MAX_FILE_BYTES  || String(10 * 1024 * 1024), 10);
+
+async function readBody(req, maxBytes = DEFAULT_MAX) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const e = new Error('Payload too large');
+      e.statusCode = 413;
+      throw e;
+    }
+    chunks.push(chunk);
+  }
   const text = Buffer.concat(chunks).toString('utf8');
   return text ? JSON.parse(text) : {};
 }

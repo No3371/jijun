@@ -2,23 +2,41 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto'; // M2 fix: cryptographically secure
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, '../../data');
+const MAX_DBS = parseInt(process.env.MAX_DBS || '500', 10);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
+// M5 fix: LRU cache — Map insertion order tracks recency; evict oldest when full.
 const dbCache = new Map();
 
 export function getDb(key) {
-  if (dbCache.has(key)) return dbCache.get(key);
+  if (dbCache.has(key)) {
+    // Refresh LRU position
+    const db = dbCache.get(key);
+    dbCache.delete(key);
+    dbCache.set(key, db);
+    return { isNew: false, db };
+  }
+
+  // Evict oldest entry if at capacity
+  if (dbCache.size >= MAX_DBS) {
+    const oldestKey = dbCache.keys().next().value;
+    const old = dbCache.get(oldestKey);
+    try { old.close(); } catch (_) { /* ignore close errors */ }
+    dbCache.delete(oldestKey);
+  }
+
   const dbPath = join(DATA_DIR, `${key}.db`);
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   initSchema(db);
   dbCache.set(key, db);
-  return db;
+  return { isNew: true, db };
 }
 
 function initSchema(db) {
@@ -492,13 +510,4 @@ export const syncLog = {
   },
 };
 
-// ── UUID helper ────────────────────────────────────────────────────────────
-
-function randomUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0;
-    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-  });
-}
-
-export { randomUUID };
+export { randomUUID }; // re-export node:crypto's randomUUID
