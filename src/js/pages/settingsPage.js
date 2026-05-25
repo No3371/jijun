@@ -354,7 +354,12 @@ export class SettingsPage {
         const input = overlay.querySelector('#key-import-input');
         const errorEl = overlay.querySelector('#key-import-error');
 
-        const close = () => document.body.removeChild(overlay);
+        const close = () => {
+            if (document.body.contains(overlay)) document.body.removeChild(overlay);
+            window.removeEventListener('hashchange', onNavigate);
+        };
+        const onNavigate = () => close();
+        window.addEventListener('hashchange', onNavigate);
 
         overlay.querySelector('#key-import-cancel').addEventListener('click', close);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });

@@ -747,8 +747,7 @@ class DataService {
   // ── Clear helpers (for import) ────────────────────────────────────────────
 
   async clearAllRecords() {
-    const all = await this.getRecords({ allLedgers: true });
-    for (const r of all) await this._delete(`/api/data/records/${r.id}`);
+    await this._delete('/api/data/records');
     return true;
   }
 

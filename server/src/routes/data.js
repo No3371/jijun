@@ -47,6 +47,10 @@ export async function handleRecords(req, res, db, method, id, url) {
     records.delete(db, parseInt(id));
     return json(res, { ok: true });
   }
+  if (method === 'DELETE' && !id) {
+    records.clear(db);
+    return json(res, { ok: true });
+  }
   err(res, 'Method not allowed', 405);
 }
 
@@ -355,152 +359,156 @@ export function handleByUUID(req, res, db, method, storeName, uuid) {
 export async function handleImport(req, res, db) {
   const data = await readBody(req);
 
-  // Clear all data
-  for (const store of [records, accounts, contacts, debts, recurring, amortizations]) store.clear(db);
-  ledgers.clear(db);
+  const doImport = db.transaction(() => {
+    for (const store of [records, accounts, contacts, debts, recurring, amortizations]) store.clear(db);
+    ledgers.clear(db);
 
-  const oldToNewLedger = new Map();
-  const oldToNewAccount = new Map();
-  const oldToNewContact = new Map();
-  const oldToNewDebt = new Map();
-  const oldToNewRecord = new Map();
+    const oldToNewLedger = new Map();
+    const oldToNewAccount = new Map();
+    const oldToNewContact = new Map();
+    const oldToNewDebt = new Map();
+    const oldToNewRecord = new Map();
 
-  // Settings
-  if (data.settings) {
-    for (const [k, v] of Object.entries(data.settings)) {
-      settings.set(db, k, { key: k, value: v });
-    }
-  }
-  if (data.customCategories) settings.set(db, 'custom_categories', { key: 'custom_categories', value: data.customCategories });
-  if (data.categoryOrder) settings.set(db, 'category_order', { key: 'category_order', value: data.categoryOrder });
-  if (data.hiddenCategories) settings.set(db, 'hidden_categories', { key: 'hidden_categories', value: data.hiddenCategories });
-  if (data.budgetSettingsMap) {
-    for (const [k, v] of Object.entries(data.budgetSettingsMap)) {
-      settings.set(db, k, { key: k, value: v });
-    }
-  } else if (data.budgetSettings) {
-    settings.set(db, 'budget_settings', { key: 'budget_settings', value: data.budgetSettings });
-  }
-
-  // Ledgers
-  if (data.ledgers?.length) {
-    for (const ledger of data.ledgers) {
-      const oldId = ledger.id;
-      const { id: _id, ...ld } = ledger;
-      if (!ld.uuid) ld.uuid = randomUUID();
-      ld.createdAt = ld.createdAt ?? Date.now();
-      const newId = ledgers.add(db, ld);
-      oldToNewLedger.set(oldId, newId);
-    }
-  }
-
-  const mapLedger = (oldId) => oldId != null && oldToNewLedger.has(oldId) ? oldToNewLedger.get(oldId) : 1;
-
-  // Accounts
-  if (data.accounts?.length) {
-    for (const acc of data.accounts) {
-      const oldId = acc.id;
-      const { id: _id, ...ad } = acc;
-      ad.ledgerId = mapLedger(ad.ledgerId);
-      if (!ad.uuid) ad.uuid = randomUUID();
-      const newId = accounts.add(db, ad);
-      oldToNewAccount.set(oldId, newId);
-    }
-  }
-
-  // Contacts
-  if (data.contacts?.length) {
-    for (const c of data.contacts) {
-      const oldId = c.id;
-      const { id: _id, ...cd } = c;
-      cd.ledgerId = mapLedger(cd.ledgerId);
-      if (!cd.uuid) cd.uuid = randomUUID();
-      const newId = contacts.add(db, cd);
-      oldToNewContact.set(oldId, newId);
-    }
-  }
-
-  // Debts (phase 1)
-  if (data.debts?.length) {
-    for (const d of data.debts) {
-      const oldId = d.id;
-      const { id: _id, ...dd } = d;
-      dd.ledgerId = mapLedger(dd.ledgerId);
-      if (!dd.uuid) dd.uuid = randomUUID();
-      if (dd.contactId) dd.contactId = oldToNewContact.get(dd.contactId) ?? dd.contactId;
-      if (dd.remainingAmount == null) dd.remainingAmount = dd.originalAmount ?? dd.amount ?? 0;
-      if (dd.originalAmount == null) dd.originalAmount = dd.amount ?? dd.remainingAmount ?? 0;
-      const newId = debts.add(db, dd);
-      oldToNewDebt.set(oldId, newId);
-    }
-  }
-
-  // Records
-  const recordsSource = data.version?.startsWith('2.') ? (data.records ?? []) : [];
-  for (const rec of recordsSource) {
-    if (!rec.date || !rec.type || !rec.category || typeof rec.amount !== 'number') continue;
-    const oldId = rec.id;
-    const { id: _id, ...rd } = rec;
-    rd.ledgerId = mapLedger(rd.ledgerId);
-    if (!rd.uuid) rd.uuid = randomUUID();
-    if (!rd.timestamp) rd.timestamp = Date.now();
-    if (rd.accountId) rd.accountId = oldToNewAccount.get(rd.accountId) ?? rd.accountId;
-    if (rd.debtId) rd.debtId = oldToNewDebt.get(rd.debtId) ?? rd.debtId;
-    const newId = records.add(db, rd);
-    if (oldId != null) oldToNewRecord.set(oldId, newId);
-  }
-
-  // Debts phase 2 – fix record links
-  if (data.debts?.length) {
-    for (const d of data.debts) {
-      const newId = oldToNewDebt.get(d.id);
-      if (!newId) continue;
-      const stored = debts.get(db, newId);
-      if (!stored) continue;
-      let changed = false;
-      if (d.recordId && oldToNewRecord.has(d.recordId)) {
-        stored.recordId = oldToNewRecord.get(d.recordId);
-        changed = true;
+    // Settings
+    if (data.settings) {
+      for (const [k, v] of Object.entries(data.settings)) {
+        settings.set(db, k, { key: k, value: v });
       }
-      if (stored.payments?.length) {
-        stored.payments = stored.payments.map(p => {
-          if (p.recordId && oldToNewRecord.has(p.recordId)) {
-            changed = true;
-            return { ...p, recordId: oldToNewRecord.get(p.recordId) };
-          }
-          return p;
-        });
+    }
+    if (data.customCategories) settings.set(db, 'custom_categories', { key: 'custom_categories', value: data.customCategories });
+    if (data.categoryOrder) settings.set(db, 'category_order', { key: 'category_order', value: data.categoryOrder });
+    if (data.hiddenCategories) settings.set(db, 'hidden_categories', { key: 'hidden_categories', value: data.hiddenCategories });
+    if (data.budgetSettingsMap) {
+      for (const [k, v] of Object.entries(data.budgetSettingsMap)) {
+        settings.set(db, k, { key: k, value: v });
       }
-      if (changed) debts.update(db, newId, stored);
+    } else if (data.budgetSettings) {
+      settings.set(db, 'budget_settings', { key: 'budget_settings', value: data.budgetSettings });
     }
-  }
 
-  // Recurring
-  if (data.recurring_transactions?.length) {
-    for (const rt of data.recurring_transactions) {
-      const { id: _id, ...rtd } = rt;
-      rtd.ledgerId = mapLedger(rtd.ledgerId);
-      if (!rtd.uuid) rtd.uuid = randomUUID();
-      if (rtd.accountId) rtd.accountId = oldToNewAccount.get(rtd.accountId) ?? rtd.accountId;
-      recurring.add(db, rtd);
+    // Ledgers
+    if (data.ledgers?.length) {
+      for (const ledger of data.ledgers) {
+        const oldId = ledger.id;
+        const { id: _id, ...ld } = ledger;
+        if (!ld.uuid) ld.uuid = randomUUID();
+        ld.createdAt = ld.createdAt ?? Date.now();
+        const newId = ledgers.add(db, ld);
+        oldToNewLedger.set(oldId, newId);
+      }
     }
-  }
 
-  // Amortizations
-  if (data.amortizations?.length) {
-    for (const am of data.amortizations) {
-      const { id: _id, ...amd } = am;
-      amd.ledgerId = mapLedger(amd.ledgerId);
-      if (!amd.uuid) amd.uuid = randomUUID();
-      amortizations.add(db, amd);
+    const mapLedger = (oldId) => oldId != null && oldToNewLedger.has(oldId) ? oldToNewLedger.get(oldId) : 1;
+
+    // Accounts
+    if (data.accounts?.length) {
+      for (const acc of data.accounts) {
+        const oldId = acc.id;
+        const { id: _id, ...ad } = acc;
+        ad.ledgerId = mapLedger(ad.ledgerId);
+        if (!ad.uuid) ad.uuid = randomUUID();
+        const newId = accounts.add(db, ad);
+        oldToNewAccount.set(oldId, newId);
+      }
     }
-  }
 
-  const activeLedgerId = data.activeLedgerId != null && oldToNewLedger.has(data.activeLedgerId)
-    ? oldToNewLedger.get(data.activeLedgerId)
-    : 1;
+    // Contacts
+    if (data.contacts?.length) {
+      for (const c of data.contacts) {
+        const oldId = c.id;
+        const { id: _id, ...cd } = c;
+        cd.ledgerId = mapLedger(cd.ledgerId);
+        if (!cd.uuid) cd.uuid = randomUUID();
+        const newId = contacts.add(db, cd);
+        oldToNewContact.set(oldId, newId);
+      }
+    }
 
-  json(res, { success: true, totalRecords: recordsSource.length, activeLedgerId });
+    // Debts (phase 1)
+    if (data.debts?.length) {
+      for (const d of data.debts) {
+        const oldId = d.id;
+        const { id: _id, ...dd } = d;
+        dd.ledgerId = mapLedger(dd.ledgerId);
+        if (!dd.uuid) dd.uuid = randomUUID();
+        if (dd.contactId) dd.contactId = oldToNewContact.get(dd.contactId) ?? dd.contactId;
+        if (dd.remainingAmount == null) dd.remainingAmount = dd.originalAmount ?? dd.amount ?? 0;
+        if (dd.originalAmount == null) dd.originalAmount = dd.amount ?? dd.remainingAmount ?? 0;
+        const newId = debts.add(db, dd);
+        oldToNewDebt.set(oldId, newId);
+      }
+    }
+
+    // Records
+    const recordsSource = data.version?.startsWith('2.') ? (data.records ?? []) : [];
+    for (const rec of recordsSource) {
+      if (!rec.date || !rec.type || !rec.category || typeof rec.amount !== 'number') continue;
+      const oldId = rec.id;
+      const { id: _id, ...rd } = rec;
+      rd.ledgerId = mapLedger(rd.ledgerId);
+      if (!rd.uuid) rd.uuid = randomUUID();
+      if (!rd.timestamp) rd.timestamp = Date.now();
+      if (rd.accountId) rd.accountId = oldToNewAccount.get(rd.accountId) ?? rd.accountId;
+      if (rd.debtId) rd.debtId = oldToNewDebt.get(rd.debtId) ?? rd.debtId;
+      const newId = records.add(db, rd);
+      if (oldId != null) oldToNewRecord.set(oldId, newId);
+    }
+
+    // Debts phase 2 – fix record links
+    if (data.debts?.length) {
+      for (const d of data.debts) {
+        const newId = oldToNewDebt.get(d.id);
+        if (!newId) continue;
+        const stored = debts.get(db, newId);
+        if (!stored) continue;
+        let changed = false;
+        if (d.recordId && oldToNewRecord.has(d.recordId)) {
+          stored.recordId = oldToNewRecord.get(d.recordId);
+          changed = true;
+        }
+        if (stored.payments?.length) {
+          stored.payments = stored.payments.map(p => {
+            if (p.recordId && oldToNewRecord.has(p.recordId)) {
+              changed = true;
+              return { ...p, recordId: oldToNewRecord.get(p.recordId) };
+            }
+            return p;
+          });
+        }
+        if (changed) debts.update(db, newId, stored);
+      }
+    }
+
+    // Recurring
+    if (data.recurring_transactions?.length) {
+      for (const rt of data.recurring_transactions) {
+        const { id: _id, ...rtd } = rt;
+        rtd.ledgerId = mapLedger(rtd.ledgerId);
+        if (!rtd.uuid) rtd.uuid = randomUUID();
+        if (rtd.accountId) rtd.accountId = oldToNewAccount.get(rtd.accountId) ?? rtd.accountId;
+        recurring.add(db, rtd);
+      }
+    }
+
+    // Amortizations
+    if (data.amortizations?.length) {
+      for (const am of data.amortizations) {
+        const { id: _id, ...amd } = am;
+        amd.ledgerId = mapLedger(amd.ledgerId);
+        if (!amd.uuid) amd.uuid = randomUUID();
+        amortizations.add(db, amd);
+      }
+    }
+
+    const activeLedgerId = data.activeLedgerId != null && oldToNewLedger.has(data.activeLedgerId)
+      ? oldToNewLedger.get(data.activeLedgerId)
+      : 1;
+
+    return { totalRecords: recordsSource.length, activeLedgerId };
+  });
+
+  const result = doImport();
+  json(res, { success: true, ...result });
 }
 
 // ── Full Export ────────────────────────────────────────────────────────────
@@ -565,19 +573,23 @@ export function handleBackup(req, res, db) {
 
 export async function handleRestore(req, res, db) {
   const backup = await readBody(req);
-  for (const store of [records, accounts, contacts, debts, recurring, amortizations]) store.clear(db);
-  ledgers.clear(db);
 
-  if (backup.ledgers) for (const { id: _id, ...l } of backup.ledgers) ledgers.add(db, l);
-  if (backup.accounts) for (const { id: _id, ...a } of backup.accounts) accounts.add(db, a);
-  if (backup.contacts) for (const { id: _id, ...c } of backup.contacts) contacts.add(db, c);
-  if (backup.debts) for (const { id: _id, ...d } of backup.debts) debts.add(db, d);
-  if (backup.records) for (const { id: _id, ...r } of backup.records) records.add(db, r);
-  if (backup.recurring_transactions) for (const { id: _id, ...r } of backup.recurring_transactions) recurring.add(db, r);
-  if (backup.amortizations) for (const { id: _id, ...a } of backup.amortizations) amortizations.add(db, a);
-  if (backup.settings) {
-    for (const [k, v] of Object.entries(backup.settings)) settings.set(db, k, v);
-  }
+  db.transaction(() => {
+    for (const store of [records, accounts, contacts, debts, recurring, amortizations]) store.clear(db);
+    ledgers.clear(db);
+
+    if (backup.ledgers) for (const { id: _id, ...l } of backup.ledgers) ledgers.add(db, l);
+    if (backup.accounts) for (const { id: _id, ...a } of backup.accounts) accounts.add(db, a);
+    if (backup.contacts) for (const { id: _id, ...c } of backup.contacts) contacts.add(db, c);
+    if (backup.debts) for (const { id: _id, ...d } of backup.debts) debts.add(db, d);
+    if (backup.records) for (const { id: _id, ...r } of backup.records) records.add(db, r);
+    if (backup.recurring_transactions) for (const { id: _id, ...r } of backup.recurring_transactions) recurring.add(db, r);
+    if (backup.amortizations) for (const { id: _id, ...a } of backup.amortizations) amortizations.add(db, a);
+    if (backup.settings) {
+      for (const [k, v] of Object.entries(backup.settings)) settings.set(db, k, v);
+    }
+  })();
+
   json(res, { ok: true });
 }
 
