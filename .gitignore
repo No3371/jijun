@@ -30,3 +30,9 @@ android/capacitor-cordova-android-plugins/build/
 *.apk
 *.aab
 *.keystore
+
+# SQLite user data files
+data/
+*.db
+*.db-shm
+*.db-wal

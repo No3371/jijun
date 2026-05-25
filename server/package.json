@@ -1,23 +1,20 @@
 {
-  "name": "easy-accounting-sync-server",
-  "version": "1.0.0",
-  "description": "輕鬆記帳雲端備份&同步伺服器 — Google OAuth Proxy",
+  "name": "jijun-server",
+  "version": "2.0.0",
+  "description": "輕鬆記帳 Self-Hosted Server — SQLite data storage + OAuth proxy",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/standalone.js",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "standalone": "node src/standalone.js",
-    "start": "node src/standalone.js"
+    "start": "node src/standalone.js",
+    "dev": "node --watch src/standalone.js"
   },
-  "devDependencies": {
-    "wrangler": "^4.63.0"
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
   },
   "keywords": [
-    "cloudflare-worker",
-    "oauth-proxy",
-    "accounting",
-    "sync"
+    "self-hosted",
+    "sqlite",
+    "accounting"
   ],
   "author": "ADT109119",
   "license": "MIT"

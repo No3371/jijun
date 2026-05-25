@@ -1,5 +1,6 @@
 import { showToast } from '../utils.js';
 import { DARK_THEME_ID } from '../themeManager.js';
+import { getKey, setKey } from '../keyManager.js';
 
 export class SettingsPage {
     constructor(app) {
@@ -43,6 +44,33 @@ export class SettingsPage {
                             </label>
                         </div>
                         
+                    </div>
+
+                    <!-- Data Key -->
+                    <div class="bg-wabi-surface rounded-xl">
+                        <h3 class="text-wabi-primary text-base font-bold px-4 pb-2 pt-4">資料金鑰</h3>
+                        <div class="px-4 pb-3">
+                            <p class="text-xs text-wabi-text-secondary mb-2">此金鑰是您在伺服器上的資料識別碼，請妥善保管。遺失後資料將無法找回。</p>
+                            <div class="flex items-center gap-2">
+                                <input id="data-key-display" type="password" readonly
+                                    class="flex-1 font-mono text-xs bg-wabi-bg border border-wabi-border rounded-lg px-3 py-2 text-wabi-text-secondary truncate"
+                                    value="">
+                                <button id="data-key-toggle" title="顯示/隱藏金鑰"
+                                    class="shrink-0 text-wabi-primary flex items-center justify-center rounded-lg bg-wabi-primary/10 size-9">
+                                    <i class="fa-solid fa-eye text-sm"></i>
+                                </button>
+                                <button id="data-key-copy" title="複製金鑰"
+                                    class="shrink-0 text-wabi-primary flex items-center justify-center rounded-lg bg-wabi-primary/10 size-9">
+                                    <i class="fa-solid fa-copy text-sm"></i>
+                                </button>
+                            </div>
+                            <div class="mt-2">
+                                <button id="data-key-import-btn"
+                                    class="text-xs text-wabi-text-secondary underline">
+                                    匯入現有金鑰（切換資料來源）
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Data Management -->
@@ -267,6 +295,89 @@ export class SettingsPage {
                 installBtnContainer.classList.remove('hidden');
             }
         }
+
+        // Data Key UI
+        const keyDisplay = document.getElementById('data-key-display');
+        const keyToggle = document.getElementById('data-key-toggle');
+        const keyCopy = document.getElementById('data-key-copy');
+        const keyImportBtn = document.getElementById('data-key-import-btn');
+
+        if (keyDisplay) {
+            keyDisplay.value = getKey() || '';
+
+            keyToggle?.addEventListener('click', () => {
+                const isHidden = keyDisplay.type === 'password';
+                keyDisplay.type = isHidden ? 'text' : 'password';
+                keyToggle.querySelector('i').className = isHidden ? 'fa-solid fa-eye-slash text-sm' : 'fa-solid fa-eye text-sm';
+            });
+
+            keyCopy?.addEventListener('click', async () => {
+                const key = getKey();
+                if (!key) return;
+                try {
+                    await navigator.clipboard.writeText(key);
+                    showToast('金鑰已複製到剪貼簿', 'success');
+                } catch {
+                    showToast('複製失敗，請手動選取', 'error');
+                }
+            });
+
+            keyImportBtn?.addEventListener('click', () => this._showKeyImportModal());
+        }
+    }
+
+    // L3 fix: replace prompt() with an inline modal so the key never touches a browser dialog
+    _showKeyImportModal() {
+        const overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4';
+        overlay.innerHTML = `
+            <div class="bg-wabi-surface rounded-2xl p-6 w-full max-w-sm space-y-4 shadow-xl">
+                <h3 class="text-wabi-primary font-bold text-lg">匯入資料金鑰</h3>
+                <p class="text-xs text-wabi-text-secondary">貼上您的 64 位元十六進位金鑰。切換後頁面將重新載入。</p>
+                <input id="key-import-input" type="text" maxlength="64" autocomplete="off" spellcheck="false"
+                    placeholder="0000...0000（64 個十六進位字元）"
+                    class="w-full font-mono text-xs bg-wabi-bg border border-wabi-border rounded-lg px-3 py-2 text-wabi-text-primary focus:outline-none focus:ring-2 focus:ring-wabi-primary">
+                <p id="key-import-error" class="text-xs text-red-500 hidden"></p>
+                <div class="flex gap-3 justify-end">
+                    <button id="key-import-cancel"
+                        class="px-4 py-2 text-sm rounded-lg bg-wabi-bg text-wabi-text-secondary hover:bg-wabi-border">
+                        取消
+                    </button>
+                    <button id="key-import-confirm"
+                        class="px-4 py-2 text-sm rounded-lg bg-wabi-primary text-white hover:opacity-90">
+                        切換
+                    </button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('#key-import-input');
+        const errorEl = overlay.querySelector('#key-import-error');
+
+        const close = () => {
+            if (document.body.contains(overlay)) document.body.removeChild(overlay);
+            window.removeEventListener('hashchange', onNavigate);
+        };
+        const onNavigate = () => close();
+        window.addEventListener('hashchange', onNavigate);
+
+        overlay.querySelector('#key-import-cancel').addEventListener('click', close);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+        overlay.querySelector('#key-import-confirm').addEventListener('click', () => {
+            const val = input.value.trim();
+            try {
+                setKey(val);
+                close();
+                showToast('金鑰已更新，正在重新載入...', 'success');
+                setTimeout(() => window.location.reload(), 800);
+            } catch {
+                errorEl.textContent = '格式錯誤：須為 64 個小寫十六進位字元';
+                errorEl.classList.remove('hidden');
+            }
+        });
+
+        input.focus();
     }
 
     createSettingItem(icon, text, id) {

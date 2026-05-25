@@ -123,17 +123,13 @@ export class PluginManager {
 
   async loadInstalledPlugins() {
     try {
-        const tx = this.dataService.db.transaction('plugins', 'readonly');
-        const store = tx.objectStore('plugins');
-        const plugins = await store.getAll();
-        
+        const plugins = await this.dataService.getPlugins();
         for (const pluginData of plugins) {
             if (pluginData.enabled) {
                 await this.loadPlugin(pluginData);
             }
         }
     } catch (e) {
-        // If store doesn't exist (schema not upgraded yet?), ignore
         console.warn('Plugins store access failed (might be first run with new version):', e);
     }
   }
@@ -360,8 +356,7 @@ export class PluginManager {
             // 檢查是否為更新，並比對權限差異
             let existingPlugin = null;
             try {
-                const tx = this.dataService.db.transaction('plugins', 'readonly');
-                existingPlugin = await tx.store.get(meta.id);
+                existingPlugin = await this.dataService.getPlugin(meta.id);
             } catch(e) { /* ignore */ }
 
             if (existingPlugin) {
@@ -405,10 +400,7 @@ export class PluginManager {
                 ...(existingPlugin && existingPlugin.storage ? { storage: existingPlugin.storage } : {})
             };
 
-            const tx = this.dataService.db.transaction('plugins', 'readwrite');
-            await tx.store.put(pluginData);
-            await tx.done;
-            
+            await this.dataService.savePlugin(pluginData);
             await this.loadPlugin(pluginData);
             resolve(pluginData);
         };
@@ -418,16 +410,13 @@ export class PluginManager {
   }
 
   async uninstallPlugin(id) {
-      const tx = this.dataService.db.transaction('plugins', 'readwrite');
-      await tx.store.delete(id);
-      await tx.done;
+      await this.dataService.deletePlugin(id);
       this.plugins.delete(id);
       showToast('插件已移除，請重新整理頁面');
   }
-    
+
   async getInstalledPlugins() {
-      const tx = this.dataService.db.transaction('plugins', 'readonly');
-      return await tx.store.getAll();
+      return await this.dataService.getPlugins();
   }
 
   registerPage(routeId, title, renderFn) {

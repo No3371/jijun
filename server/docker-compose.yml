@@ -1,12 +1,18 @@
 services:
-  sync-server:
+  jijun-server:
     build: .
-    container_name: easy-accounting-sync
+    container_name: jijun-server
     ports:
       - "8787:8787"
     environment:
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # H3 fix: ALLOWED_ORIGINS defaults to empty (same-origin only).
+      # Set to your frontend origin if the API is on a different host/port.
+      # Example: ALLOWED_ORIGINS=https://myapp.example.com
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - PORT=8787
+    volumes:
+      # M1 fix: persist SQLite data files across container restarts
+      - ./data:/app/data
     restart: unless-stopped
