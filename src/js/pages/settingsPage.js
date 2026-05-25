@@ -1,5 +1,6 @@
 import { showToast } from '../utils.js';
 import { DARK_THEME_ID } from '../themeManager.js';
+import { getKey, setKey } from '../keyManager.js';
 
 export class SettingsPage {
     constructor(app) {
@@ -43,6 +44,33 @@ export class SettingsPage {
                             </label>
                         </div>
                         
+                    </div>
+
+                    <!-- Data Key -->
+                    <div class="bg-wabi-surface rounded-xl">
+                        <h3 class="text-wabi-primary text-base font-bold px-4 pb-2 pt-4">資料金鑰</h3>
+                        <div class="px-4 pb-3">
+                            <p class="text-xs text-wabi-text-secondary mb-2">此金鑰是您在伺服器上的資料識別碼，請妥善保管。遺失後資料將無法找回。</p>
+                            <div class="flex items-center gap-2">
+                                <input id="data-key-display" type="password" readonly
+                                    class="flex-1 font-mono text-xs bg-wabi-bg border border-wabi-border rounded-lg px-3 py-2 text-wabi-text-secondary truncate"
+                                    value="">
+                                <button id="data-key-toggle" title="顯示/隱藏金鑰"
+                                    class="shrink-0 text-wabi-primary flex items-center justify-center rounded-lg bg-wabi-primary/10 size-9">
+                                    <i class="fa-solid fa-eye text-sm"></i>
+                                </button>
+                                <button id="data-key-copy" title="複製金鑰"
+                                    class="shrink-0 text-wabi-primary flex items-center justify-center rounded-lg bg-wabi-primary/10 size-9">
+                                    <i class="fa-solid fa-copy text-sm"></i>
+                                </button>
+                            </div>
+                            <div class="mt-2">
+                                <button id="data-key-import-btn"
+                                    class="text-xs text-wabi-text-secondary underline">
+                                    匯入現有金鑰（切換資料來源）
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Data Management -->
@@ -266,6 +294,45 @@ export class SettingsPage {
             if (installBtnContainer) {
                 installBtnContainer.classList.remove('hidden');
             }
+        }
+
+        // Data Key UI
+        const keyDisplay = document.getElementById('data-key-display');
+        const keyToggle = document.getElementById('data-key-toggle');
+        const keyCopy = document.getElementById('data-key-copy');
+        const keyImportBtn = document.getElementById('data-key-import-btn');
+
+        if (keyDisplay) {
+            keyDisplay.value = getKey() || '';
+
+            keyToggle?.addEventListener('click', () => {
+                const isHidden = keyDisplay.type === 'password';
+                keyDisplay.type = isHidden ? 'text' : 'password';
+                keyToggle.querySelector('i').className = isHidden ? 'fa-solid fa-eye-slash text-sm' : 'fa-solid fa-eye text-sm';
+            });
+
+            keyCopy?.addEventListener('click', async () => {
+                const key = getKey();
+                if (!key) return;
+                try {
+                    await navigator.clipboard.writeText(key);
+                    showToast('金鑰已複製到剪貼簿', 'success');
+                } catch {
+                    showToast('複製失敗，請手動選取', 'error');
+                }
+            });
+
+            keyImportBtn?.addEventListener('click', async () => {
+                const input = prompt('貼上您的 64 位元金鑰（切換後將重新載入頁面）：');
+                if (!input) return;
+                try {
+                    setKey(input.trim());
+                    showToast('金鑰已更新，正在重新載入...', 'success');
+                    setTimeout(() => window.location.reload(), 1000);
+                } catch (e) {
+                    showToast(`金鑰格式錯誤：${e.message}`, 'error');
+                }
+            });
         }
     }
 
